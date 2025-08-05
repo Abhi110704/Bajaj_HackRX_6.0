@@ -1,7 +1,7 @@
 # Main.py
 """
 HackRx 6.0 - Final API using Google Gemini (Fast, Reliable, Clean)
-Refactored for Render's Free Tier with improved error handling.
+Refactored for Render's Free Tier with correct auth for embeddings.
 """
 from dotenv import load_dotenv
 load_dotenv()
@@ -27,7 +27,6 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain.docstore.document import Document
 from PyPDF2 import PdfReader
 import google.generativeai as genai
-# --- ADD THIS IMPORT FOR SPECIFIC ERROR HANDLING ---
 from google.api_core import exceptions as google_exceptions
 
 # --- Setup ---
@@ -55,7 +54,7 @@ TEMP_DIR.mkdir(exist_ok=True)
 app = FastAPI(
     title="HackRx 6.0 API",
     description="High-Accuracy Gemini-Powered LLM Q&A System (Free Tier)",
-    version="6.2.1-free"
+    version="6.2.2-free"
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -111,7 +110,9 @@ def build_vector_index(text: str):
     
     docs = [Document(page_content=chunk) for chunk in chunks]
     
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+    # --- THIS IS THE FIX ---
+    # Explicitly pass the API key to the embeddings class constructor.
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=GEMINI_API_KEY)
     
     logger.info("Building FAISS vector index using Google's Embedding API...")
     vectorstore = FAISS.from_documents(docs, embeddings)
@@ -142,7 +143,6 @@ def run_hackrx(req: HackRxRunRequest, _: str = Depends(verify_token)):
         if not full_text.strip():
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document appears to be empty or unreadable.")
 
-        # --- FIX: Add specific error handling for the most likely point of failure ---
         try:
             vectordb = build_vector_index(full_text)
         except google_exceptions.PermissionDenied as e:
@@ -194,7 +194,7 @@ def run_hackrx(req: HackRxRunRequest, _: str = Depends(verify_token)):
 
 @app.get("/health", tags=["Monitoring"])
 def health():
-    return {"status": "healthy", "version": "6.2.1-free", "timestamp": datetime.now().isoformat()}
+    return {"status": "healthy", "version": "6.2.2-free", "timestamp": datetime.now().isoformat()}
 
 @app.get("/", include_in_schema=False)
 def redirect_to_docs():
