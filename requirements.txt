@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+pypdf2
+langchain
+langchain-community
+langchain-huggingface
+sentence-transformers
+faiss-cpu
+torch
+google-generativeai
