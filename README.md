@@ -32,8 +32,8 @@ An intelligent FastAPI-based backend system that parses insurance documents (PDF
 
 ```
 HackRx_Complete_Submission/
-├── Main.py        # Main FastAPI backend
-├── requirements.txt                    # Python dependencies
+├── Main.py               # Main FastAPI backend
+├── requirements.txt      # Python dependencies
 ```
 
 ---
