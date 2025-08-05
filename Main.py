@@ -1,7 +1,7 @@
 # Main.py
 """
 HackRx 6.0 - Final API using Google Gemini (Fast, Reliable, Clean)
-Refactored for Render's Free Tier with correct auth for embeddings.
+Refactored for <30s response time on the Free Tier using a selective RAG pipeline.
 """
 from dotenv import load_dotenv
 load_dotenv()
@@ -10,10 +10,11 @@ import os
 import requests
 import logging
 import time
-from typing import List
+from typing import List, Set
 from pathlib import Path
 from datetime import datetime
 import shutil
+import re
 
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,8 +54,8 @@ TEMP_DIR.mkdir(exist_ok=True)
 # --- FastAPI App ---
 app = FastAPI(
     title="HackRx 6.0 API",
-    description="High-Accuracy Gemini-Powered LLM Q&A System (Free Tier)",
-    version="6.2.2-free"
+    description="High-Speed, High-Accuracy Gemini Q&A System (Free Tier)",
+    version="6.3.0-fast"
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -78,7 +79,7 @@ class HackRxRunResponse(BaseModel):
 
 # --- Utility Functions ---
 def download_pdf(url: str) -> Path:
-    """Downloads a PDF from a URL and saves it to a temporary path."""
+    # (No changes to this function)
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
@@ -93,7 +94,7 @@ def download_pdf(url: str) -> Path:
     return pdf_path
 
 def extract_text_from_pdf(pdf_path: Path) -> str:
-    """Extracts text from a local PDF file."""
+    # (No changes to this function)
     try:
         reader = PdfReader(pdf_path)
         return "\n".join(page.extract_text() or "" for page in reader.pages)
@@ -101,26 +102,36 @@ def extract_text_from_pdf(pdf_path: Path) -> str:
         logger.error(f"Failed to extract text from {pdf_path}. Error: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to parse PDF content.")
 
-def build_vector_index(text: str):
-    """Builds a FAISS vector index from the given text using Google's embedding API."""
-    chunks = RecursiveCharacterTextSplitter(
-        chunk_size=1000, 
-        chunk_overlap=150
-    ).split_text(text)
-    
-    docs = [Document(page_content=chunk) for chunk in chunks]
-    
-    # --- THIS IS THE FIX ---
-    # Explicitly pass the API key to the embeddings class constructor.
+# --- NEW: Functions for the high-speed selective pipeline ---
+def get_keywords(question: str) -> Set[str]:
+    """Extracts simple keywords from a question."""
+    question = re.sub(r'[^\w\s]', '', question)
+    # Simple stop words list, can be expanded
+    stop_words = {"what", "is", "the", "and", "are", "a", "an", "for", "to", "of", "in", "does", "this", "policy", "cover"}
+    words = {word.lower() for word in question.split() if word.lower() not in stop_words and len(word) > 2}
+    return words
+
+def find_relevant_chunks_fast(keywords: Set[str], all_chunks: List[Document]) -> List[Document]:
+    """Performs a fast keyword search to find relevant chunks."""
+    relevant_chunks = []
+    for chunk in all_chunks:
+        chunk_text_lower = chunk.page_content.lower()
+        if any(keyword in chunk_text_lower for keyword in keywords):
+            relevant_chunks.append(chunk)
+    return relevant_chunks
+
+def build_targeted_vector_index(docs: List[Document]):
+    """Builds a FAISS index from a SMALL list of pre-selected documents."""
+    if not docs:
+        return None
     embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=GEMINI_API_KEY)
-    
-    logger.info("Building FAISS vector index using Google's Embedding API...")
+    logger.info(f"Building targeted FAISS index for {len(docs)} chunks...")
     vectorstore = FAISS.from_documents(docs, embeddings)
-    logger.info("Vector index built successfully.")
+    logger.info("Targeted vector index built successfully.")
     return vectorstore
 
 def query_gemini(prompt: str) -> str:
-    """Queries the Gemini model using the official SDK."""
+    # (No changes to this function)
     try:
         model = genai.GenerativeModel('models/gemini-1.5-flash-latest')
         response = model.generate_content(prompt)
@@ -138,26 +149,39 @@ def run_hackrx(req: HackRxRunRequest, _: str = Depends(verify_token)):
 
     pdf_path = None
     try:
+        # --- Stage 1: Fast initial processing (Done once per request) ---
         pdf_path = download_pdf(req.documents)
         full_text = extract_text_from_pdf(pdf_path)
         if not full_text.strip():
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document appears to be empty or unreadable.")
 
-        try:
-            vectordb = build_vector_index(full_text)
-        except google_exceptions.PermissionDenied as e:
-            logger.error(f"Google API Permission Denied: {e}")
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Gemini API Permission Denied. Please check that your API key is valid and has the 'Generative Language API' or 'Vertex AI API' enabled in your Google Cloud project.")
-        except google_exceptions.ResourceExhausted as e:
-            logger.error(f"Google API Rate Limit Exceeded: {e}")
-            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="You have exceeded your Gemini API quota. Please check your usage limits or wait and try again.")
-        except Exception as e:
-            logger.error(f"Failed to build vector index: {e}", exc_info=True)
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An unexpected error occurred while creating document embeddings: {e}")
+        # Chunk the entire document once. This is fast.
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+        all_chunks = text_splitter.create_documents([full_text])
 
         answers = []
+        # --- Stage 2: Process each question individually and quickly ---
         for q in req.questions:
-            context_docs = vectordb.similarity_search(q, k=5)
+            logger.info(f"Processing question: '{q}'")
+            
+            # Step 2a: Fast keyword search to find candidate chunks
+            keywords = get_keywords(q)
+            candidate_chunks = find_relevant_chunks_fast(keywords, all_chunks)
+
+            if not candidate_chunks:
+                logger.warning(f"No relevant chunks found for keywords: {keywords}")
+                answers.append("This information is not found in the provided document sections.")
+                continue
+
+            # Step 2b: Build a small, temporary vector index for only the candidate chunks
+            try:
+                vectordb = build_targeted_vector_index(candidate_chunks)
+            except Exception as e:
+                logger.error(f"Failed to build targeted vector index for question '{q}': {e}", exc_info=True)
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An error occurred during embedding for one of the questions.")
+
+            # Step 2c: Perform similarity search and generate the answer
+            context_docs = vectordb.similarity_search(q, k=5) # k=5 is good since the source is already small
             context = "\n\n---\n\n".join(doc.page_content for doc in context_docs)
             
             prompt = (
@@ -194,7 +218,7 @@ def run_hackrx(req: HackRxRunRequest, _: str = Depends(verify_token)):
 
 @app.get("/health", tags=["Monitoring"])
 def health():
-    return {"status": "healthy", "version": "6.2.2-free", "timestamp": datetime.now().isoformat()}
+    return {"status": "healthy", "version": "6.3.0-fast", "timestamp": datetime.now().isoformat()}
 
 @app.get("/", include_in_schema=False)
 def redirect_to_docs():
