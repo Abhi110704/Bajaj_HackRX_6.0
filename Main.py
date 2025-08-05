@@ -1,7 +1,7 @@
 # Main.py
 """
 HackRx 6.0 - Final API using Google Gemini (Fast, Reliable, Clean)
-Refactored for Render's Free Tier by using API-based embeddings.
+Refactored for Render's Free Tier with improved error handling.
 """
 from dotenv import load_dotenv
 load_dotenv()
@@ -23,11 +23,12 @@ from pydantic import BaseModel
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-# --- CHANGE 1: Import the new Google Generative AI Embeddings ---
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain.docstore.document import Document
 from PyPDF2 import PdfReader
 import google.generativeai as genai
+# --- ADD THIS IMPORT FOR SPECIFIC ERROR HANDLING ---
+from google.api_core import exceptions as google_exceptions
 
 # --- Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -54,7 +55,7 @@ TEMP_DIR.mkdir(exist_ok=True)
 app = FastAPI(
     title="HackRx 6.0 API",
     description="High-Accuracy Gemini-Powered LLM Q&A System (Free Tier)",
-    version="6.2.0-free"
+    version="6.2.1-free"
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -110,8 +111,6 @@ def build_vector_index(text: str):
     
     docs = [Document(page_content=chunk) for chunk in chunks]
     
-    # --- CHANGE 2: Use the Google embedding model via API ---
-    # This is very lightweight and uses minimal server memory.
     embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
     
     logger.info("Building FAISS vector index using Google's Embedding API...")
@@ -143,7 +142,18 @@ def run_hackrx(req: HackRxRunRequest, _: str = Depends(verify_token)):
         if not full_text.strip():
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document appears to be empty or unreadable.")
 
-        vectordb = build_vector_index(full_text)
+        # --- FIX: Add specific error handling for the most likely point of failure ---
+        try:
+            vectordb = build_vector_index(full_text)
+        except google_exceptions.PermissionDenied as e:
+            logger.error(f"Google API Permission Denied: {e}")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Gemini API Permission Denied. Please check that your API key is valid and has the 'Generative Language API' or 'Vertex AI API' enabled in your Google Cloud project.")
+        except google_exceptions.ResourceExhausted as e:
+            logger.error(f"Google API Rate Limit Exceeded: {e}")
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="You have exceeded your Gemini API quota. Please check your usage limits or wait and try again.")
+        except Exception as e:
+            logger.error(f"Failed to build vector index: {e}", exc_info=True)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An unexpected error occurred while creating document embeddings: {e}")
 
         answers = []
         for q in req.questions:
@@ -184,7 +194,7 @@ def run_hackrx(req: HackRxRunRequest, _: str = Depends(verify_token)):
 
 @app.get("/health", tags=["Monitoring"])
 def health():
-    return {"status": "healthy", "version": "6.2.0-free", "timestamp": datetime.now().isoformat()}
+    return {"status": "healthy", "version": "6.2.1-free", "timestamp": datetime.now().isoformat()}
 
 @app.get("/", include_in_schema=False)
 def redirect_to_docs():
