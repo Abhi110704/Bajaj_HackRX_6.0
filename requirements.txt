@@ -5,8 +5,6 @@ requests
 pypdf2
 langchain
 langchain-community
-langchain-huggingface
-sentence-transformers
-faiss-cpu
-torch
 google-generativeai
+langchain-google-genai
+faiss-cpu
