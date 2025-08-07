@@ -59,7 +59,7 @@ uvicorn Main:app --reload
 ```
 
 4. **Test at Swagger UI**
-Visit 👉 [http://127.0.0.1:8000/docs](https://hackerxhacker.onrender.com/docs)  
+Visit 👉 [https://hackerxhacker.onrender.com/docs] 
 Use `POST /hackrx/run` endpoint to ask queries on any insurance PDF via URL.
 
 ---
