@@ -109,12 +109,19 @@ def get_keywords(question: str) -> Set[str]:
 
 def find_relevant_chunks_fast(keywords: Set[str], all_chunks: List[Document]) -> List[Document]:
     """Performs a fast keyword search to find relevant chunks."""
-    relevant_chunks = set()
+    relevant_chunks = [] # <-- FIX 1: Initialize as a list
+    seen_chunks = set() # Helper to track duplicates
     for chunk in all_chunks:
+        # Create a unique identifier for the chunk to avoid duplicates
+        chunk_id = chunk.page_content
+        if chunk_id in seen_chunks:
+            continue
+
         chunk_text_lower = chunk.page_content.lower()
         if any(keyword in chunk_text_lower for keyword in keywords):
-            relevant_chunks.add(chunk)
-    return list(relevant_chunks)
+            relevant_chunks.append(chunk) # <-- FIX 2: Append to the list
+            seen_chunks.add(chunk_id)
+    return relevant_chunks
 
 def build_targeted_vector_index(docs: List[Document]):
     """Builds a FAISS index from a SMALL list of pre-selected documents."""
