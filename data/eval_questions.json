@@ -1,0 +1,10 @@
+[
+  {
+    "question": "What does the policy cover?",
+    "ground_truth": "The policy covers hospitalization charges, doctor fees, and diagnostics."
+  },
+  {
+    "question": "Is COVID treatment included?",
+    "ground_truth": "Yes, COVID-19 treatment is included under the health policy."
+  }
+]

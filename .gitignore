@@ -1,0 +1,70 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Virtual Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Jupyter Notebooks Checkpoints
+.ipynb_checkpoints/
+
+# PyInstaller
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# FastAPI specific
+*.db
+instance/
+*.sqlite3
+
+# LangChain or vector store outputs
+*.pkl
+*.json
+*.csv
+*.faiss
+*.npz
+
+# VSCode
+.vscode/
+
+# Logs and runtime files
+*.log
+
+# dotenv
+.env
+.env.*
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# macOS
+.DS_Store
+
+# system files
+Thumbs.db

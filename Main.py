@@ -1,8 +1,4 @@
-# Main.py
-"""
-HackRx 6.0 Submission - High-Accuracy, High-Speed RAG System
-Designed for >90% accuracy and <30s response time on a free tier.
-"""
+# Main.py (optimized and cleaned)
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -28,47 +24,40 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain.docstore.document import Document
 from PyPDF2 import PdfReader
 import google.generativeai as genai
-from google.api_core import exceptions as google_exceptions
 
 # --- Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Environment variables
 HACKRX_TOKEN = os.getenv("HACKRX_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MAX_QUESTIONS = int(os.getenv("MAX_QUESTIONS", 10))
 
-# Configure the Gemini client
 if not GEMINI_API_KEY:
-    raise ValueError("GEMINI_API_KEY not found in environment variables.")
+    raise ValueError("GEMINI_API_KEY not set.")
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Temporary directory for file downloads
 TEMP_DIR = Path("./temp_docs")
 if TEMP_DIR.exists():
     shutil.rmtree(TEMP_DIR)
 TEMP_DIR.mkdir(exist_ok=True)
 
-
-# --- FastAPI App ---
+# --- FastAPI ---
 app = FastAPI(
     title="HackRx 6.0 API",
-    description="High-Speed, High-Accuracy Gemini Q&A System (Free Tier)",
-    version="7.0.0-final"
+    description="Enhanced Gemini RAG System",
+    version="7.1.1-optimized"
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-
-# --- Security ---
+# --- Auth ---
 auth_scheme = HTTPBearer()
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(auth_scheme)):
     if credentials.credentials != HACKRX_TOKEN:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing token")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     return credentials.credentials
 
-
-# --- Pydantic Models ---
+# --- Models ---
 class HackRxRunRequest(BaseModel):
     documents: str
     questions: List[str]
@@ -76,149 +65,98 @@ class HackRxRunRequest(BaseModel):
 class HackRxRunResponse(BaseModel):
     answers: List[str]
 
-
-# --- Utility Functions ---
+# --- Helpers ---
 def download_pdf(url: str) -> Path:
     try:
-        response = requests.get(url, timeout=20) # Lowered timeout
+        response = requests.get(url, timeout=20)
         response.raise_for_status()
-    except requests.RequestException as e:
-        logger.error(f"Failed to download document from {url}. Error: {e}")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unable to download document: {e}")
-
-    pdf_path = TEMP_DIR / f"doc_{int(time.time())}_{os.getpid()}.pdf"
-    with open(pdf_path, "wb") as f:
-        f.write(response.content)
-    logger.info(f"Successfully downloaded PDF to {pdf_path}")
-    return pdf_path
+        pdf_path = TEMP_DIR / f"doc_{int(time.time())}_{os.getpid()}.pdf"
+        with open(pdf_path, "wb") as f:
+            f.write(response.content)
+        logger.info(f"Downloaded PDF: {pdf_path}")
+        return pdf_path
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to download document: {e}")
 
 def extract_text_from_pdf(pdf_path: Path) -> str:
     try:
         reader = PdfReader(pdf_path)
         return "\n".join(page.extract_text() or "" for page in reader.pages)
-    except Exception as e:
-        logger.error(f"Failed to extract text from {pdf_path}. Error: {e}")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to parse PDF content.")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to parse PDF")
 
 def get_keywords(question: str) -> Set[str]:
-    """Extracts simple, meaningful keywords from a question."""
     question = re.sub(r'[^\w\s-]', '', question.lower())
     stop_words = {"what", "is", "the", "and", "are", "a", "an", "for", "to", "of", "in", "does", "this", "policy", "cover", "under"}
-    words = {word for word in question.split() if word not in stop_words and len(word) > 3}
-    return words
+    return {word for word in question.split() if word not in stop_words and len(word) > 3}
 
 def find_relevant_chunks_fast(keywords: Set[str], all_chunks: List[Document]) -> List[Document]:
-    """Performs a fast keyword search to find relevant chunks."""
-    relevant_chunks = [] # <-- FIX 1: Initialize as a list
-    seen_chunks = set() # Helper to track duplicates
+    relevant = []
+    seen = set()
     for chunk in all_chunks:
-        # Create a unique identifier for the chunk to avoid duplicates
-        chunk_id = chunk.page_content
-        if chunk_id in seen_chunks:
+        text = chunk.page_content.lower()
+        if chunk.page_content in seen:
             continue
-
-        chunk_text_lower = chunk.page_content.lower()
-        if any(keyword in chunk_text_lower for keyword in keywords):
-            relevant_chunks.append(chunk) # <-- FIX 2: Append to the list
-            seen_chunks.add(chunk_id)
-    return relevant_chunks
-
-def build_targeted_vector_index(docs: List[Document]):
-    """Builds a FAISS index from a SMALL list of pre-selected documents."""
-    if not docs:
-        return None
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=GEMINI_API_KEY)
-    logger.info(f"Building targeted FAISS index for {len(docs)} chunks...")
-    vectorstore = FAISS.from_documents(docs, embeddings)
-    logger.info("Targeted vector index built successfully.")
-    return vectorstore
+        if any(kw in text for kw in keywords):
+            relevant.append(chunk)
+            seen.add(chunk.page_content)
+    return relevant
 
 def query_gemini(prompt: str) -> str:
     try:
         model = genai.GenerativeModel('models/gemini-1.5-flash-latest')
         response = model.generate_content(prompt)
-        # Add a check for empty or blocked responses
-        if not response.parts:
-            logger.warning("Gemini response was blocked or empty.")
-            return "The model could not generate a response for this query."
-        return response.text
+        return response.text if response.parts else "This information is not found in the provided document sections."
     except Exception as e:
         logger.error(f"Gemini API Error: {e}")
         return "Error: The AI model failed to generate a response."
 
-
-# --- API Endpoints ---
+# --- Main Endpoint ---
 @app.post("/hackrx/run", response_model=HackRxRunResponse)
 def run_hackrx(req: HackRxRunRequest, _: str = Depends(verify_token)):
-    if len(req.questions) > MAX_QUESTIONS:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Too many questions (max {MAX_QUESTIONS})")
-
+    start_time = time.time()
     pdf_path = None
     try:
-        # --- Stage 1: Fast initial processing (Done once per request) ---
+        if len(req.questions) > MAX_QUESTIONS:
+            raise HTTPException(status_code=400, detail=f"Too many questions (max {MAX_QUESTIONS})")
+
         pdf_path = download_pdf(req.documents)
         full_text = extract_text_from_pdf(pdf_path)
         if not full_text.strip():
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document appears to be empty or unreadable.")
+            raise HTTPException(status_code=400, detail="Empty or unreadable document")
 
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-        all_chunks = text_splitter.create_documents([full_text])
+        splitter = RecursiveCharacterTextSplitter(chunk_size=700, chunk_overlap=100)
+        all_chunks = splitter.create_documents([full_text])
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=GEMINI_API_KEY)
+        index = FAISS.from_documents(all_chunks, embeddings)
 
         answers = []
-        # --- Stage 2: Process each question individually and quickly ---
         for q in req.questions:
-            logger.info(f"Processing question: '{q}'")
-            
-            keywords = get_keywords(q)
-            candidate_chunks = find_relevant_chunks_fast(keywords, all_chunks)
-
-            if not candidate_chunks:
-                logger.warning(f"No relevant chunks found via keyword search for: {keywords}")
-                # As a fallback, use the first few chunks of the document
-                candidate_chunks = all_chunks[:10] # Fallback to first 10 chunks
-
-            try:
-                vectordb = build_targeted_vector_index(candidate_chunks)
-                if not vectordb:
-                    answers.append("Could not build a searchable index for this question.")
-                    continue
-            except Exception as e:
-                logger.error(f"Failed to build vector index for question '{q}': {e}", exc_info=True)
-                raise HTTPException(status_code=500, detail=f"An error occurred during embedding: {e}")
-
-            context_docs = vectordb.similarity_search(q, k=5)
-            context = "\n\n---\n\n".join(doc.page_content for doc in context_docs)
-            
+            logger.info(f"Processing: {q}")
+            docs = index.similarity_search(q, k=7)
+            context = "\n\n---\n\n".join(doc.page_content for doc in docs)
             prompt = (
-                "You are an AI assistant for an insurance company. Your task is to answer questions based strictly on the provided text from a policy document. "
-                "Provide direct, factual answers in the same format as the examples. Do not add any conversational phrases. "
-                "If the information is not in the provided text, you must state exactly: 'This information is not found in the provided document sections.'\n\n"
-                f"CONTEXT:\n{context}\n\n"
-                f"QUESTION: {q}\n\n"
-                "ANSWER:"
+                "You are an AI assistant for an insurance company. Answer based strictly on the provided policy document.\n\n"
+                f"Context:\n{context}\n\n"
+                f"Question: {q}\n\nAnswer:"
             )
-            
-            response = query_gemini(prompt)
-            answers.append(response.strip())
+            ans = query_gemini(prompt).strip()
+            answers.append(ans)
 
+        total_time = time.time() - start_time
+        logger.info(f"/hackrx/run completed in {total_time:.2f} seconds.")
+        print(f"\n🎯 Total time to respond: {total_time:.2f} seconds.\n")
         return HackRxRunResponse(answers=answers)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"An unexpected error occurred during processing: {e}", exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An internal error occurred while processing your request.")
 
     finally:
         if pdf_path and pdf_path.exists():
             pdf_path.unlink()
-            logger.info(f"Cleaned up temporary file: {pdf_path}")
+            logger.info(f"Cleaned up temp file: {pdf_path}")
 
-
-@app.get("/health", tags=["Monitoring"])
+@app.get("/health")
 def health():
-    return {"status": "healthy", "version": "7.0.0-final", "timestamp": datetime.now().isoformat()}
+    return {"status": "healthy", "version": "7.1.1-optimized", "timestamp": datetime.now().isoformat()}
 
 @app.get("/", include_in_schema=False)
-def redirect_to_docs():
+def root():
     return RedirectResponse("/docs")
