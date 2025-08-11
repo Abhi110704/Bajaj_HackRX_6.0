@@ -1,7 +1,7 @@
 # Main.py
 """
-HackRx 6.0 - Final API using Google Gemini (Fast, Reliable, Clean)
-Refactored for Render's Free Tier with correct auth for embeddings.
+HackRx 6.0 Submission - High-Accuracy, High-Speed RAG System
+Designed for >90% accuracy, <30s response time, and descriptive answer formatting.
 """
 from dotenv import load_dotenv
 load_dotenv()
@@ -10,10 +10,11 @@ import os
 import requests
 import logging
 import time
-from typing import List
+from typing import List, Set
 from pathlib import Path
 from datetime import datetime
 import shutil
+import re
 
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,8 +54,8 @@ TEMP_DIR.mkdir(exist_ok=True)
 # --- FastAPI App ---
 app = FastAPI(
     title="HackRx 6.0 API",
-    description="High-Accuracy Gemini-Powered LLM Q&A System (Free Tier)",
-    version="6.2.2-free"
+    description="High-Speed, High-Accuracy Gemini Q&A System (Free Tier)",
+    version="7.1.0-final"
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -78,9 +79,8 @@ class HackRxRunResponse(BaseModel):
 
 # --- Utility Functions ---
 def download_pdf(url: str) -> Path:
-    """Downloads a PDF from a URL and saves it to a temporary path."""
     try:
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, timeout=20)
         response.raise_for_status()
     except requests.RequestException as e:
         logger.error(f"Failed to download document from {url}. Error: {e}")
@@ -93,7 +93,6 @@ def download_pdf(url: str) -> Path:
     return pdf_path
 
 def extract_text_from_pdf(pdf_path: Path) -> str:
-    """Extracts text from a local PDF file."""
     try:
         reader = PdfReader(pdf_path)
         return "\n".join(page.extract_text() or "" for page in reader.pages)
@@ -101,22 +100,33 @@ def extract_text_from_pdf(pdf_path: Path) -> str:
         logger.error(f"Failed to extract text from {pdf_path}. Error: {e}")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to parse PDF content.")
 
-def build_vector_index(text: str):
-    """Builds a FAISS vector index from the given text using Google's embedding API."""
-    chunks = RecursiveCharacterTextSplitter(
-        chunk_size=1000, 
-        chunk_overlap=150
-    ).split_text(text)
-    
-    docs = [Document(page_content=chunk) for chunk in chunks]
-    
-    # --- THIS IS THE FIX ---
-    # Explicitly pass the API key to the embeddings class constructor.
+def get_keywords(question: str) -> Set[str]:
+    """Extracts simple, meaningful keywords from a question."""
+    question = re.sub(r'[^\w\s-]', '', question.lower())
+    stop_words = {"what", "is", "the", "and", "are", "a", "an", "for", "to", "of", "in", "does", "this", "policy", "cover", "under"}
+    words = {word for word in question.split() if word not in stop_words and len(word) > 3}
+    return words
+
+def find_relevant_chunks_fast(keywords: Set[str], all_chunks: List[Document]) -> List[Document]:
+    """Performs a fast keyword search to find relevant chunks."""
+    relevant_chunks = []
+    seen_chunks_content = set()
+    for chunk in all_chunks:
+        chunk_text_lower = chunk.page_content.lower()
+        if any(keyword in chunk_text_lower for keyword in keywords):
+            if chunk.page_content not in seen_chunks_content:
+                relevant_chunks.append(chunk)
+                seen_chunks_content.add(chunk.page_content)
+    return relevant_chunks
+
+def build_targeted_vector_index(docs: List[Document]):
+    """Builds a FAISS index from a SMALL list of pre-selected documents."""
+    if not docs:
+        return None
     embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004", google_api_key=GEMINI_API_KEY)
-    
-    logger.info("Building FAISS vector index using Google's Embedding API...")
+    logger.info(f"Building targeted FAISS index for {len(docs)} chunks...")
     vectorstore = FAISS.from_documents(docs, embeddings)
-    logger.info("Vector index built successfully.")
+    logger.info("Targeted vector index built successfully.")
     return vectorstore
 
 def query_gemini(prompt: str) -> str:
@@ -124,6 +134,9 @@ def query_gemini(prompt: str) -> str:
     try:
         model = genai.GenerativeModel('models/gemini-1.5-flash-latest')
         response = model.generate_content(prompt)
+        if not response.parts:
+            logger.warning("Gemini response was blocked or empty.")
+            return "The model could not generate a response for this query."
         return response.text
     except Exception as e:
         logger.error(f"Gemini API Error: {e}")
@@ -143,36 +156,46 @@ def run_hackrx(req: HackRxRunRequest, _: str = Depends(verify_token)):
         if not full_text.strip():
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Document appears to be empty or unreadable.")
 
-        try:
-            vectordb = build_vector_index(full_text)
-        except google_exceptions.PermissionDenied as e:
-            logger.error(f"Google API Permission Denied: {e}")
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Gemini API Permission Denied. Please check that your API key is valid and has the 'Generative Language API' or 'Vertex AI API' enabled in your Google Cloud project.")
-        except google_exceptions.ResourceExhausted as e:
-            logger.error(f"Google API Rate Limit Exceeded: {e}")
-            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="You have exceeded your Gemini API quota. Please check your usage limits or wait and try again.")
-        except Exception as e:
-            logger.error(f"Failed to build vector index: {e}", exc_info=True)
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"An unexpected error occurred while creating document embeddings: {e}")
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+        all_chunks = text_splitter.create_documents([full_text])
 
         answers = []
         for q in req.questions:
+            logger.info(f"Processing question: '{q}'")
+            
+            keywords = get_keywords(q)
+            candidate_chunks = find_relevant_chunks_fast(keywords, all_chunks)
+
+            if not candidate_chunks:
+                logger.warning(f"No relevant chunks found via keyword search for: {keywords}")
+                candidate_chunks = all_chunks[:10]
+
+            try:
+                vectordb = build_targeted_vector_index(candidate_chunks)
+                if not vectordb:
+                    answers.append("Could not build a searchable index for this question.")
+                    continue
+            except Exception as e:
+                logger.error(f"Failed to build vector index for question '{q}': {e}", exc_info=True)
+                raise HTTPException(status_code=500, detail=f"An error occurred during embedding: {e}")
+
             context_docs = vectordb.similarity_search(q, k=5)
             context = "\n\n---\n\n".join(doc.page_content for doc in context_docs)
             
+            # --- FINAL PROMPT FOR DESCRIPTIVE, HIGH-ACCURACY ANSWERS ---
             prompt = (
-                "You are a meticulous and highly precise AI insurance analyst. Your sole task is to answer questions based *only* on the "
-                "specific context provided from an insurance policy document. You must adhere to the following rules without exception:\n\n"
+                "You are an AI assistant tasked with answering questions about an insurance policy. Your role is to act as a helpful policy expert. "
+                "Your answers must be based *only* on the provided context sections from the policy document.\n\n"
                 "RULES:\n"
-                "1. **Cite the Facts:** Base your answer exclusively on the text within the 'CONTEXT' section. Do not use any outside knowledge.\n"
-                "2. **Be Exact:** When the question asks for a number, a time period, a percentage, or a specific condition, you must find and state that exact detail. Do not be vague.\n"
-                "3. **Stay Concise:** Provide a direct, professional answer. Do not add conversational fluff like 'Based on the context...' or 'The document states...'.\n"
-                "4. **Handle Missing Information:** If, and only if, the answer is not present in the provided context, you must respond with the exact phrase: 'This information is not found in the provided document sections.'\n\n"
+                "1. **Answer in a complete, descriptive sentence.** Do not use single-word or very short, clipped answers. Frame the answer as if you are explaining it to a policyholder.\n"
+                "2. **Be Factual:** Base your answer exclusively on the text within the 'CONTEXT' section. Do not infer information or use outside knowledge.\n"
+                "3. **Extract Specifics:** If the context contains details like numbers, percentages, or time periods (e.g., '30 days', '5%', '2 years'), you must include them in your answer.\n"
+                "4. **Handle Missing Information:** If the information to answer the question is not in the context, your entire response must be the exact phrase: 'This information is not found in the provided document sections.'\n\n"
                 "---\n\n"
                 f"CONTEXT:\n{context}\n\n"
                 "---\n\n"
                 f"QUESTION: {q}\n\n"
-                "PRECISE ANSWER:"
+                "DESCRIPTIVE ANSWER:"
             )
             
             response = query_gemini(prompt)
@@ -194,7 +217,7 @@ def run_hackrx(req: HackRxRunRequest, _: str = Depends(verify_token)):
 
 @app.get("/health", tags=["Monitoring"])
 def health():
-    return {"status": "healthy", "version": "6.2.2-free", "timestamp": datetime.now().isoformat()}
+    return {"status": "healthy", "version": "7.1.0-final", "timestamp": datetime.now().isoformat()}
 
 @app.get("/", include_in_schema=False)
 def redirect_to_docs():
